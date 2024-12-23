@@ -1,6 +1,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
+#include <list>
 #include <memory>
 #include <set>
 #include "utils.hpp"
@@ -28,11 +29,18 @@ struct Node
 	std::unordered_set<Node*> edges;
 };
 
+using clique_t = std::vector<Node*>;
+//using clique_t = std::list<Node*>;
+
 struct NodeSorter
 {
 	bool operator()(Node const* lhs, Node const* rhs) const
 	{
-		return lhs->id < rhs->id;
+		if (lhs && rhs)
+		{
+			return lhs->id < rhs->id;
+		}
+		return lhs > rhs;
 	}
 };
 
@@ -81,7 +89,20 @@ struct VectorHasher
 	size_t operator()(std::vector<Node*> nodes) const
 	{
 		size_t hash = 0;
-		std::sort(nodes.begin(), nodes.end(), [](Node* lhs, Node* rhs) { return lhs->id < rhs->id; });
+		std::sort(nodes.begin(), nodes.end(), NodeSorter());
+
+		for (auto const& node : nodes)
+		{
+			hash_combine(hash, node->id);
+		}
+
+		return hash;
+	}
+
+	size_t operator()(std::list<Node*> nodes) const
+	{
+		size_t hash = 0;
+		nodes.sort([](Node const* lhs, Node const* rhs) { return lhs->id < rhs->id; });
 
 		for (auto const& node : nodes)
 		{
@@ -175,7 +196,37 @@ size_t CountTriosWithT(Graph const& g)
 	return triplets.size();
 }
 
-void BuildFullyConnectedSet(Graph const& g, Node* lastAdded, std::set<Node*, NodeSorter>& set, std::set<Node*, NodeSorter>& best)
+template <typename T>
+void CliqueInsert(T& clique, Node * node)
+	requires(std::is_same<T, std::vector<Node*>>::value)
+{
+	clique.push_back(node);
+	//std::sort(clique.begin(), clique.end(), NodeSorter());
+}
+
+template <typename T>
+void CliqueInsert(T& clique, Node* node)
+	requires(std::is_same<T, std::list<Node*>>::value)
+{
+	auto itr = std::find(clique.rbegin(), clique.rend(), nullptr);
+	if(itr == clique.rend())
+	{
+		clique.push_back(node);
+		clique.sort(NodeSorter());
+		return;
+	}
+	*itr = node;
+}
+
+template <typename T>
+void CliqueErase(T& clique, Node* node)
+	requires(std::is_same<T, std::vector<Node*>>::value || std::is_same<T, std::list<Node*>>::value)
+{
+	auto itr = std::find(clique.begin(), clique.end(), node);
+	if (itr != clique.end()) *itr = nullptr;
+}
+
+void BuildFullyConnectedSet(Graph const& g, Node* lastAdded, clique_t & set, clique_t & best)
 {
 	static std::unordered_set<size_t> seen;
 
@@ -201,21 +252,21 @@ void BuildFullyConnectedSet(Graph const& g, Node* lastAdded, std::set<Node*, Nod
 
 		size_t setSize = set.size();
 
-		set.insert(node);
+		CliqueInsert(set, node);
 
 		BuildFullyConnectedSet(g, node, set, best);
 
-		set.erase(node);
+		CliqueErase(set, node);
 	}
 }
 
 std::vector<Node*> BuildFullyConnectedSet(Graph const& g)
 {
-	std::set<Node*, NodeSorter> best;
+	clique_t best;
 	std::vector<Node*> bestVec;
 	for (auto const& node : g.nodes)
 	{
-		std::set<Node*, NodeSorter> current = { node.get() };
+		clique_t current = { node.get() };
 		BuildFullyConnectedSet(g, node.get(), current, best);
 	}
 
