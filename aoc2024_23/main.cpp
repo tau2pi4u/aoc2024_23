@@ -13,26 +13,51 @@
 #define INFILE "input.txt"
 #endif
 
-int GetNextId()
+uint16_t GetNextId()
 {
-	static int id = 0;
-	return id++;
+	static uint16_t id = 0;
+	return ++id;
 }
+
+uint16_t GetNextTag()
+{
+	static uint16_t tag = 0;
+	return ++tag;
+}
+
 
 struct Node
 {
-	Node(std::string const& name) : name(name), id(GetNextId()) {}
+	Node(std::string const& name) : nameAsInt(GetNameAsInt(name)), id(GetNextId()), tag(0) {}
+	Node(uint16_t nameAsInt) : nameAsInt(nameAsInt), id(GetNextId()), tag(0) {}
 
-	std::string name;
-	int id;
+	static int GetNameAsInt(std::string const& name)
+	{
+		return (name[0] << 8) | name[1];
+	}
 
-	std::unordered_set<Node*> edges;
+	uint16_t nameAsInt;
+	uint16_t id;
+	uint16_t tag;
+
+	std::vector<Node*> edges;
 };
 
 using clique_t = std::vector<Node*>;
-//using clique_t = std::list<Node*>;
 
 struct NodeSorter
+{
+	bool operator()(Node const* lhs, Node const* rhs) const
+	{
+		if (lhs && rhs)
+		{
+			return lhs->nameAsInt < rhs->nameAsInt;
+		}
+		return lhs > rhs;
+	}
+};
+
+struct NodeIdSorter
 {
 	bool operator()(Node const* lhs, Node const* rhs) const
 	{
@@ -48,7 +73,7 @@ struct Triplet
 {
 	Triplet(std::vector<Node*>  in)
 	{
-		std::sort(in.begin(), in.end(), [](Node const* lhs, Node const* rhs) {return lhs->id < rhs->id; });
+		std::sort(in.begin(), in.end(), NodeSorter());
 		a = in[0];
 		b = in[1];
 		c = in[2];
@@ -77,9 +102,9 @@ struct TripletHasher
 	size_t operator()(Triplet const& triplet) const
 	{
 		size_t hash = 0;
-		hash_combine(hash, triplet.a->id);
-		hash_combine(hash, triplet.b->id);
-		hash_combine(hash, triplet.c->id);
+		hash_combine(hash, triplet.a->nameAsInt);
+		hash_combine(hash, triplet.b->nameAsInt);
+		hash_combine(hash, triplet.c->nameAsInt);
 		return hash;
 	}
 };
@@ -93,32 +118,7 @@ struct VectorHasher
 
 		for (auto const& node : nodes)
 		{
-			hash_combine(hash, node->id);
-		}
-
-		return hash;
-	}
-
-	size_t operator()(std::list<Node*> nodes) const
-	{
-		size_t hash = 0;
-		nodes.sort([](Node const* lhs, Node const* rhs) { return lhs->id < rhs->id; });
-
-		for (auto const& node : nodes)
-		{
-			hash_combine(hash, node->id);
-		}
-
-		return hash;
-	}
-
-	size_t operator()(std::set<Node*, NodeSorter> const& nodes) const
-	{
-		size_t hash = 0;
-
-		for (auto const& node : nodes)
-		{
-			hash_combine(hash, node->id);
+			hash_combine(hash, node->nameAsInt);
 		}
 
 		return hash;
@@ -128,7 +128,7 @@ struct VectorHasher
 struct Graph
 {
 	std::vector<std::unique_ptr<Node>> nodes;
-	std::unordered_map<std::string, Node*> nodesByName;
+	std::unordered_map<uint16_t, Node*> nodesByName;
 };
 
 Graph BuildGraph(std::vector<std::string> const& inputLines)
@@ -136,12 +136,13 @@ Graph BuildGraph(std::vector<std::string> const& inputLines)
 	Graph g;
 	auto get_node = [&](std::string const& name)
 	{
-		if (g.nodesByName.count(name) == 0)
+		auto nameAsInt = Node::GetNameAsInt(name);
+		if (g.nodesByName.count(nameAsInt) == 0)
 		{
-			g.nodes.push_back(std::make_unique<Node>(name));
-			g.nodesByName[name] = g.nodes.back().get();
+			g.nodes.push_back(std::make_unique<Node>(nameAsInt));
+			g.nodesByName.insert({ nameAsInt, g.nodes.back().get() });
 		}
-		return g.nodesByName.at(name);
+		return g.nodesByName.at(nameAsInt);
 	};
 
 	for (auto const& line : inputLines)
@@ -152,16 +153,33 @@ Graph BuildGraph(std::vector<std::string> const& inputLines)
 		auto nodeA = get_node(nodeAName);
 		auto nodeB = get_node(nodeBName);
 
-		nodeA->edges.insert(nodeB);
-		nodeB->edges.insert(nodeA);
+		nodeA->edges.push_back(nodeB);
+		nodeB->edges.push_back(nodeA);
 	}
 
 	return g;
 }
 
+void SortEdges(Graph& g)
+{
+	for (auto& node : g.nodes)
+	{
+		std::sort(node->edges.begin(), node->edges.end(), NodeIdSorter());
+	}
+}
+
 bool IsConnected(Node* a, Node* b)
 {
-	return a->edges.count(b);
+	auto itr = std::find(a->edges.begin(), a->edges.end(), b);
+	return itr != a->edges.end();
+}
+
+std::string NameIntToStr(uint16_t nameAsInt)
+{
+	std::string out;
+	out += static_cast<char>(nameAsInt >> 8);
+	out += static_cast<char>(nameAsInt & 0xff);
+	return out;
 }
 
 size_t CountTriosWithT(Graph const& g)
@@ -170,93 +188,58 @@ size_t CountTriosWithT(Graph const& g)
 
 	for (auto const& nodeA : g.nodes)
 	{
-		if (nodeA->name[0] != 't') continue;
 		for (auto const& nodeB : nodeA->edges)
 		{
+			if (nodeB->id >= nodeA->id) continue;
+
 			for (auto const& nodeC : nodeB->edges)
 			{
-				if (nodeC == nodeA.get()) continue;
-				if (nodeC->edges.end() == std::find(nodeC->edges.begin(), nodeC->edges.end(), nodeA.get()))
+				if (nodeC->id >= nodeB->id) continue;
+
+				if (!IsConnected(nodeA.get(), nodeC))
 				{
 					continue;
 				}
 
-				auto triplet = Triplet({ nodeA.get(), nodeB, nodeC});
+				if (!(NameIntToStr(nodeA->nameAsInt)[0] == 't' || NameIntToStr(nodeB->nameAsInt)[0] == 't' || NameIntToStr(nodeC->nameAsInt)[0] == 't'))
+				{
+					continue;
+				}
+
+				auto triplet = Triplet({ nodeA.get(), nodeB, nodeC });
 				if (triplets.count(triplet)) continue;
 				triplets.insert(triplet);
-
-				if (!IsConnected(nodeA.get(), nodeB)) Unreachable();
-				if (!IsConnected(nodeB, nodeC)) Unreachable();
-				if (!IsConnected(nodeA.get(), nodeC)) Unreachable();
-
-				//printf("%s, %s, %s\n", nodeA->name.c_str(), nodeB->name.c_str(), nodeC->name.c_str());
 			}
 		}
 	}
 	return triplets.size();
 }
 
-template <typename T>
-void CliqueInsert(T& clique, Node * node)
-	requires(std::is_same<T, std::vector<Node*>>::value)
+Node* LastNodeNotNull(std::vector<Node*> & clique)
 {
-	clique.push_back(node);
-	//std::sort(clique.begin(), clique.end(), NodeSorter());
-}
-
-template <typename T>
-void CliqueInsert(T& clique, Node* node)
-	requires(std::is_same<T, std::list<Node*>>::value)
-{
-	auto itr = std::find(clique.rbegin(), clique.rend(), nullptr);
-	if(itr == clique.rend())
-	{
-		clique.push_back(node);
-		clique.sort(NodeSorter());
-		return;
-	}
-	*itr = node;
-}
-
-template <typename T>
-void CliqueErase(T& clique, Node* node)
-	requires(std::is_same<T, std::vector<Node*>>::value || std::is_same<T, std::list<Node*>>::value)
-{
-	auto itr = std::find(clique.begin(), clique.end(), node);
-	if (itr != clique.end()) *itr = nullptr;
+	return *std::find_if(clique.rbegin(), clique.rend(), [](Node * node) { return !!node; });
 }
 
 void BuildFullyConnectedSet(Graph const& g, Node* lastAdded, clique_t & set, clique_t & best)
 {
-	static std::unordered_set<size_t> seen;
-
-	size_t hash = VectorHasher()(set);
-	if (seen.count(hash)) return;
-	seen.insert(hash);
-
-	if (set.size() > best.size())
+	for (auto& node : set.front()->edges)
 	{
-		best = set;
-	}
-
-	for (auto& node : lastAdded->edges)
-	{
-		if (set.end() != std::find(set.begin(), set.end(), node)) continue;
+		if (node->id <= set.back()->id) continue;
 
 		bool stillFullyConnected = true;
 		for (auto& oNode : set)
 		{
 			stillFullyConnected &= IsConnected(node, oNode);
+			if (!stillFullyConnected) break;
 		}
 		if (!stillFullyConnected) continue;
 
-		size_t setSize = set.size();
+		set.push_back(node);
+	}
 
-		CliqueInsert(set, node);
-
-		BuildFullyConnectedSet(g, node, set, best);
-
-		CliqueErase(set, node);
+	if (set.size() > best.size())
+	{
+		best = set;
 	}
 }
 
@@ -264,15 +247,18 @@ std::vector<Node*> BuildFullyConnectedSet(Graph const& g)
 {
 	clique_t best;
 	std::vector<Node*> bestVec;
+
+	clique_t current;
+
 	for (auto const& node : g.nodes)
 	{
-		clique_t current = { node.get() };
+		current = { node.get() };
 		BuildFullyConnectedSet(g, node.get(), current, best);
 	}
 
 	bestVec.insert(bestVec.begin(), best.begin(), best.end());
 
-	std::sort(bestVec.begin(), bestVec.end(), [](Node* lhs, Node* rhs) {return lhs->name < rhs->name; });
+	std::sort(bestVec.begin(), bestVec.end(), [](Node* lhs, Node* rhs) {return lhs->nameAsInt < rhs->nameAsInt; });
 
 	return bestVec;
 }
@@ -286,8 +272,10 @@ int main()
 {
 	auto t0 = TIME;
 	auto inputLines = GetInputAsString(INFILE);
-	auto t1 = TIME;
+	auto ts = TIME;
 	auto g = BuildGraph(inputLines);
+	auto t1 = TIME;
+	SortEdges(g);
 	auto t2 = TIME;
 	auto p1 = CountTriosWithT(g);
 	auto t3 = TIME;
@@ -298,12 +286,13 @@ int main()
 	printf("p1: %zu\n", p1);
 	for (auto const& node : best)
 	{
-		printf("%s,", node->name.c_str());
+		printf("%s,", NameIntToStr(node->nameAsInt).c_str());
 	}
 	printf("\n");
 
-	printf("io: %lld\n", DIFF(t0, t1));
-	printf("gb: %lld\n", DIFF(t1, t2));
+	printf("io: %lld\n", DIFF(t0, ts));
+	printf("gb: %lld\n", DIFF(ts, t1));
+	printf("es: %lld\n", DIFF(t1, t2));
 	printf("p1: %lld\n", DIFF(t2, t3));
 	printf("p2: %lld\n", DIFF(t3, t4));
 }
